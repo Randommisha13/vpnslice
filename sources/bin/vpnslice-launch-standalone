@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+
+set -eu -o pipefail
+
+MY_NAME="vpnslice-launch-user"
+CONFIG_FILE=""
+
+load_config() {
+    if [[ -z "${CONFIG_FILE}" ]]
+    then
+        CONFIG_FILE="${XDG_CONFIG_HOME:-${HOME}/.config}/vpnslice.json"
+    fi
+
+    if ! [[ -f "${CONFIG_FILE}" ]]
+    then
+        notify-send --app-name="${MY_NAME}" "No config file '${CONFIG_FILE}'"
+        exit 1
+    fi
+
+    tmp_config="$(mktemp --tmpdir "vpnslice.XXXXX")"
+
+    cp --update=all "${CONFIG_FILE}" "${tmp_config}"
+
+    VPN_UNIT_NAME="$(jq -rcM '.vpn_unit_name' "${tmp_config}")"
+
+    FWMARK_NUMBER="$(jq -rcM '.fwmark_number' "${tmp_config}")"
+    IPROUTE2_TABLE_NUMBER="$(jq -rcM '.iproute2_table_number' "${tmp_config}")"
+    NFTABLES_TABLE_NAME="$(jq -rcM '.nftables_table_name' "${tmp_config}")"
+    SYSTEMD_SLICE_NAME="$(jq -rcM '.systemd_slice_name' "${tmp_config}")"
+    VPN_TUN_NAME="$(jq -rcM '.vpn_tun_name' "${tmp_config}")"
+}
+
+check_dependencies() {
+    local -a DEPENDENCIES=()
+    local -a FAILED_DEPENDENCIES=()
+
+    if ! command -v "notify-send" >/dev/null 2>&1
+    then
+        echo "'notify-send' not installed, can't do GUI notifications :("
+        exit 1
+    fi
+
+    DEPENDENCIES=(
+        "dex"
+        "find"
+        "jq"
+        "locate"
+        "systemd-run"
+    )
+
+    for dependency in "${DEPENDENCIES[@]}"
+    do
+        if ! command -v "${dependency}" >/dev/null 2>&1
+        then
+            FAILED_DEPENDENCIES+=("${dependency}")
+        fi
+    done
+
+    if [[ "${#FAILED_DEPENDENCIES[@]}" -gt 0 ]]
+    then
+        notify-send --app-name="${MY_NAME}" "Following dependencies failed: ${FAILED_DEPENDENCIES[*]}"
+        exit 1
+    fi
+}
+
+get_running_flatpaks() {
+    systemctl --user status \
+        | grep -E -e "─app-flatpak" \
+        | grep -v -E '─[0-9]+ grep' \
+        | cut --delimiter="─" --fields=2
+}
+
+set_flatpak_rules() {
+    if [[ "$#" == "0" ]]
+    then
+        echo "Error 'set_flatpak_rules': expected at least 1 argument"
+        exit 1
+    fi
+
+    print_flatpak_rules "$@" \
+        | pkexec nft -f-
+}
+
+print_flatpak_rules() {
+    # start
+    cat << END_OF_RULES
+table inet ${NFTABLES_TABLE_NAME} {
+    chain output {
+END_OF_RULES
+
+    # templating in bash :(
+    for flatpak_scope in "$@"
+    do
+        cat << END_OF_RULES
+        socket cgroupv2 level 5 "/user.slice/user-${USER_UID}.slice/user@${USER_UID}.service/app.slice/${flatpak_scope}" meta mark set ${FWMARK_NUMBER} counter
+END_OF_RULES
+    done
+
+    # end
+cat << END_OF_RULES
+    }
+}
+END_OF_RULES
+}
+
+run_systemd() {
+    set +u
+    ENV_ARGS=()
+    [ -n "${DISPLAY}" ] && ENV_ARGS+=("--setenv=DISPLAY=${DISPLAY}")
+    [ -n "${WAYLAND_DISPLAY}" ] && ENV_ARGS+=("--setenv=WAYLAND_DISPLAY=${WAYLAND_DISPLAY}")
+    [ -n "${XAUTHORITY}" ] && ENV_ARGS+=("--setenv=XAUTHORITY=${XAUTHORITY}")
+    [ -n "${XDG_RUNTIME_DIR}" ] && ENV_ARGS+=("--setenv=XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}")
+    [ -n "${XDG_SESSION_TYPE}" ] && ENV_ARGS+=("--setenv=XDG_SESSION_TYPE=${XDG_SESSION_TYPE}")
+    [ -n "${XDG_CURRENT_DESKTOP}" ] && ENV_ARGS+=("--setenv=XDG_CURRENT_DESKTOP=${XDG_CURRENT_DESKTOP}")
+    ENV_ARGS+=("--setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=${RUNTIME_DIR}/bus")
+    ENV_ARGS+=("--setenv=ELECTRON_OZONE_PLATFORM_HINT=auto")
+    set -u
+
+    exec systemd-run \
+        --user \
+        --description="Netslice Proxied App" \
+        --slice "${SYSTEMD_SLICE_NAME}.slice" \
+        --scope \
+        "${ENV_ARGS[@]}" \
+        -- "$@"
+}
+
+run_desktop_noflatpak() {
+    set +u
+    ENV_ARGS=()
+    [ -n "${DISPLAY}" ] && ENV_ARGS+=("--setenv=DISPLAY=${DISPLAY}")
+    [ -n "${WAYLAND_DISPLAY}" ] && ENV_ARGS+=("--setenv=WAYLAND_DISPLAY=${WAYLAND_DISPLAY}")
+    [ -n "${XAUTHORITY}" ] && ENV_ARGS+=("--setenv=XAUTHORITY=${XAUTHORITY}")
+    [ -n "${XDG_RUNTIME_DIR}" ] && ENV_ARGS+=("--setenv=XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}")
+    [ -n "${XDG_SESSION_TYPE}" ] && ENV_ARGS+=("--setenv=XDG_SESSION_TYPE=${XDG_SESSION_TYPE}")
+    [ -n "${XDG_CURRENT_DESKTOP}" ] && ENV_ARGS+=("--setenv=XDG_CURRENT_DESKTOP=${XDG_CURRENT_DESKTOP}")
+    ENV_ARGS+=("--setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=${RUNTIME_DIR}/bus")
+    ENV_ARGS+=("--setenv=ELECTRON_OZONE_PLATFORM_HINT=auto")
+    set -u
+
+    exec systemd-run \
+        --user \
+        --description="Netslice Proxied App" \
+        --slice "${SYSTEMD_SLICE_NAME}.slice" \
+        --scope \
+        "${ENV_ARGS[@]}" \
+        -- dex "$@"
+}
+
+run_desktop_flatpak() {
+    local -a flatpaks_before=()
+    local -a flatpaks_after=()
+    local -a flatpaks_diff=()
+
+    mapfile -t flatpaks_before < <(get_running_flatpaks)
+
+    dex "$@" &
+    job_pid="$!"
+
+    sleep 2
+
+    mapfile -t flatpaks_after < <(get_running_flatpaks)
+
+    local MATCH=0
+    for after in "${flatpaks_after[@]}"
+    do
+        MATCH=0
+
+        for before in "${flatpaks_before[@]}"
+        do
+            if [[ "${before}" == "${after}" ]] 
+            then
+                MATCH=1
+                break
+            fi
+        done
+
+        if [[ "${MATCH}" == 0 ]]
+        then
+            flatpaks_diff+=("${after}")
+        fi
+    done
+
+    if [[ -n "${flatpaks_diff[*]}" ]]
+    then
+        set_flatpak_rules "${flatpaks_diff[@]}" 
+    fi
+
+    wait "${job_pid}"
+}
+
+main() {
+    if [[ "$#" -gt 0 ]]
+    then
+        case "$1" in
+            --config)
+                CONFIG_FILE="${2}"
+                shift 2
+                ;;
+            -c)
+                CONFIG_FILE="${2}"
+                shift 2
+                ;;
+        esac
+    fi
+
+    load_config
+    check_dependencies
+
+    USER_UID="$(id -u)"
+    RUNTIME_DIR="${XDG_RUNTIME_DIR}"
+
+    set +u
+    if [[ -z "${DESKTOP_ENTRY_ID}" ]]
+    then
+        set -u
+        run_systemd "$@"
+        exit
+    fi
+    set -u
+
+    USER_APPLICATIONS_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/applications"
+
+    DESKTOP_ENTRY_LOCATION="$(locate "/${DESKTOP_ENTRY_ID}" | head -1)" \
+    || DESKTOP_ENTRY_LOCATION="$(find "${USER_APPLICATIONS_DIR}" -name "${DESKTOP_ENTRY_ID}")"
+
+    if [[ -z "${DESKTOP_ENTRY_LOCATION}" ]]
+    then
+        notify-send --app-name="${MY_NAME}" "Can't find '${DESKTOP_ENTRY_ID}'"
+        exit 1
+    fi
+    
+    case "${DESKTOP_ENTRY_LOCATION}" in
+        "/usr/share/applications/"*)
+            ;;
+        "/var/lib/flatpak/"*)
+            ;;
+        "${HOME}/.local/share/applications/"*)
+            ;;
+        *)
+            notify-send --app-name="${MY_NAME}" "Unknown folder $(dirname "${DESKTOP_ENTRY_LOCATION}") for '${DESKTOP_ENTRY_ID}'"
+            exit 1
+            ;;
+    esac
+
+    DESKTOP_ENTRY_EXECUTABLE="$(
+        dex -d "${DESKTOP_ENTRY_LOCATION}" \
+            | grep -E -e "^Executing command: " \
+            | cut --delimiter=":" --fields=2 \
+            | cut --delimiter=" " --fields=2
+    )"
+
+    case "${DESKTOP_ENTRY_EXECUTABLE}" in 
+        /usr/bin/flatpak)
+            run_desktop_flatpak "${DESKTOP_ENTRY_LOCATION}"
+            ;;
+        *)
+            run_desktop_noflatpak "${DESKTOP_ENTRY_LOCATION}"
+            ;;
+    esac
+}
+
+main "$@"

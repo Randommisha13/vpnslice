@@ -1,0 +1,20 @@
+polkit.addRule(function(action, subject) {
+    if ((action.id == "org.freedesktop.policykit.exec") &&
+	    (action.lookup("program") == "{{ VPNSLICE_HELPERS_DIR }}/vpnslice-user-finalize") &&
+            subject.isInGroup("wheel")) {
+            return polkit.Result.YES;
+    }
+
+    return polkit.Result.NOT_HANDLED;
+});
+
+
+polkit.addRule(function(action, subject) {
+    if ((action.id == "org.freedesktop.policykit.exec") &&
+	    (action.lookup("program") == "{{ VPNSLICE_HELPERS_DIR }}/vpnslice-user-flatpak-helper") &&
+            subject.isInGroup("wheel")) {
+            return polkit.Result.YES;
+    }
+
+    return polkit.Result.NOT_HANDLED;
+});

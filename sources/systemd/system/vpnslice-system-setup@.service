@@ -1,0 +1,13 @@
+[Unit]
+Description=vpnslice system setup for config %i
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ VPNSLICE_HELPERS_DIR }}/vpnslice-setup-system --setup --config %i.json
+ExecStop={{ VPNSLICE_HELPERS_DIR }}/vpnslice-setup-system --unsetup --config %i.json
+Restart=no
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

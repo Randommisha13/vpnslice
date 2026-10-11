@@ -1,0 +1,68 @@
+#!/usr/bin/bash
+
+set -eu -o pipefail
+
+NFTABLES_TABLE_PREFIX="vpnslice"
+VPNSLICE_STATE_DIR="{{ VPNSLICE_STATE_DIR }}"
+
+print_global_nftables_rules() {
+    cat << END_OF_RULES
+table inet ${NFTABLES_TABLE_NAME} {
+    chain output {
+        type route hook output priority mangle; policy accept;
+        socket cgroupv2 level 4 "/user.slice/user-${SUDO_UID}.slice/user@${SUDO_UID}.service/${USER_SLICE_NAME}.slice" meta mark set ${FWMARK_NUMBER} counter
+    }
+}
+END_OF_RULES
+}
+
+set_global_nftables_rules() {
+    print_global_nftables_rules \
+        | nft -f-
+}
+
+main() {
+    if [[ "$(id -u)" != "0" ]]
+    then
+        echo "This is a helper script that should be executed as root" >&2
+        exit 1
+    fi
+
+    set +u
+    if [[ -z "${SUDO_UID}" ]]
+    then
+        echo "This script should be executed using some form of privilege elevation (SUDO_UID should be set)" >&2
+        exit 1
+    fi
+    set -u
+
+    if [[ "$#" -lt 1 ]]
+    then
+        echo "At least SLICE_ID is required" >&2
+        exit 1
+    fi
+
+    USER_SLICE_NAME="${1}"
+    shift
+
+    if ! [[ -d "/sys/fs/cgroup/user.slice/user-${SUDO_UID}.slice/user@${SUDO_UID}.service/${USER_SLICE_NAME}.slice" ]]
+    then
+        echo "User slice '${USER_SLICE_NAME}' does not exist" >&2
+        exit 1
+    fi
+
+    SUDO_USERNAME="$(id --name --user "${SUDO_UID}")"
+    NFTABLES_TABLE_NAME="${NFTABLES_TABLE_PREFIX}-${SUDO_UID}-${SUDO_USERNAME}-${USER_SLICE_NAME}"
+
+    if ! [[ -f "${VPNSLICE_STATE_DIR}/${NFTABLES_TABLE_NAME}" ]]
+    then
+        echo "vpnslice for user '${SUDO_USERNAME}' slice '${USER_SLICE_NAME}' is not set up" >&2
+        exit 1
+    fi
+
+    source "${VPNSLICE_STATE_DIR}/${NFTABLES_TABLE_NAME}"
+    
+    set_global_nftables_rules "$@"
+}
+
+main "$@"

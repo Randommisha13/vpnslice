@@ -1,0 +1,13 @@
+[Unit]
+Description=vpnslice user setup for slice %i
+
+[Service]
+Type=oneshot
+ExecStartPre=test -d '{{ VPNSLICE_STATE_DIR }}'
+ExecStartPre=systemctl --user start %i.slice
+ExecStart=/usr/bin/pkexec {{ VPNSLICE_HELPERS_DIR }}/vpnslice-user-finalize %i
+RemainAfterExit=yes
+Restart=no
+
+[Install]
+WantedBy=default.target

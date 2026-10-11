@@ -1,0 +1,5 @@
+{
+    "mark_range_start": 10000,
+    "mark_range_count": 10000,
+    "vpnslice_state_dir": "{{ VPNSLICE_STATE_DIR }}"
+}

@@ -1,0 +1,301 @@
+#!/usr/bin/env bash
+
+set -eu -o pipefail
+
+VPNSLICE_SETUP_CONFIG_DIR="{{ VPNSLICE_CONFIG_DIR }}"
+VPNSLICE_SETUP_GLOBAL_CONFIG="${VPNSLICE_SETUP_CONFIG_DIR}/global.json"
+
+VPNSLICE_STATE_DIR="{{ VPNSLICE_STATE_DIR }}"
+
+NFTABLES_TABLE_PREFIX="vpnslice"
+MARK_RANGE_START="10000"
+MARK_RANGE_COUNT="10000"
+
+CONFIG_FILE=""
+
+load_config() {
+    local CONFIG_PATH=""
+    case "${CONFIG_FILE}" in 
+        "/"*)
+            CONFIG_PATH="${CONFIG_FILE}"
+            ;;
+        *)
+            CONFIG_PATH="${VPNSLICE_SETUP_CONFIG_DIR}/${CONFIG_FILE}"
+            ;;
+    esac
+
+    case "${CONFIG_PATH}" in 
+        "${VPNSLICE_SETUP_CONFIG_DIR}/global.json")
+            echo "name 'global.json' is reserved for global configuration" >&2
+            exit 1
+            ;;
+        "${VPNSLICE_SETUP_CONFIG_DIR}/vpnslice.json")
+            echo "name 'vpnslice.json' is reserved" >&2
+            exit 1
+            ;;
+    esac
+
+    if ! [[ -f "${CONFIG_PATH}" ]]
+    then
+        echo "No config file '${CONFIG_PATH}'" >&2
+        exit 1
+    fi
+
+    tmp_config="$(mktemp --tmpdir "vpnslice.XXXXX")"
+    cp --update=all "${CONFIG_PATH}" "${tmp_config}"
+
+    USERNAME="$(jq -rcM '.username' "${tmp_config}")"
+    USER_SLICE_NAME="$(jq -rcM '.user_slice_name' "${tmp_config}")"
+    VPN_TUN_NAME="$(jq -rcM '.vpn_tun_name' "${tmp_config}")"
+
+    rm "${tmp_config}"
+
+    if [[ -f "${VPNSLICE_SETUP_GLOBAL_CONFIG}" ]]
+    then
+        tmp_config="$(mktemp --tmpdir "vpnslice.XXXXX")"
+        cp --update=all "${VPNSLICE_SETUP_GLOBAL_CONFIG}" "${tmp_config}"
+
+        MARK_RANGE_START="$(jq -rcM '.mark_range_start' "${tmp_config}")"
+        MARK_RANGE_COUNT="$(jq -rcM '.mark_range_count' "${tmp_config}")"
+        VPNSLICE_STATE_DIR="$(jq -rcM '.vpnslice_state_dir' "${tmp_config}")"
+
+        rm "${tmp_config}"
+    fi
+}
+
+value_in_array() {
+    if [[ "$#" -lt 3 ]]
+    then
+        echo "Error in 'value_in_array': expected at lease 3 arguments (value to match, --, array elements)"
+        exit 1
+    fi
+
+    local match="${1}"
+    shift
+
+    if [[ ! "${1}" == "--" ]]
+    then
+        echo "Error in 'value_in_array': expected delimiter (--) as a second argument"
+        exit 1
+    else
+        shift
+    fi
+
+    for element in "$@"
+    do
+        if [[ "${match}" == "${element}" ]]
+        then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+load_settings() {
+    USER_UID="$(id --user "${USERNAME}")"
+    STATE_FILE="${VPNSLICE_STATE_DIR}/${NFTABLES_TABLE_PREFIX}-${USER_UID}-${USERNAME}-${USER_SLICE_NAME}"
+
+    if [[ -f "${STATE_FILE}" ]]
+    then
+        source "${STATE_FILE}"
+    fi
+}
+
+remove_settings() {
+    if [[ -f "${STATE_FILE}" ]]
+    then
+        echo "Removing state file '${STATE_FILE}'"
+        rm "${STATE_FILE}"
+    fi
+
+    if [[ -f "${VPNSLICE_STATE_DIR}/fwmarks" ]]
+    then
+        echo "Marking fwmark '${FWMARK_NUMBER}' as free..."
+        sed --in-place "/^${FWMARK_NUMBER}\$/d" "${VPNSLICE_STATE_DIR}/fwmarks"
+    fi
+}
+
+generate_settings() {
+    if [[ ! -d "${VPNSLICE_STATE_DIR}" ]]
+    then
+        if [[ -e "${VPNSLICE_STATE_DIR}" ]]
+        then
+            echo "'${VPNSLICE_STATE_DIR}' (used as state directory) exists, but is not a directory" >&2
+            exit 1
+        fi
+
+        echo "Creating state directory ('${VPNSLICE_STATE_DIR}')..."
+        mkdir --mode=700 "${VPNSLICE_STATE_DIR}"
+    fi
+
+    if [[ ! -f "${VPNSLICE_STATE_DIR}/fwmarks" ]]
+    then
+        if [[ -e "${VPNSLICE_STATE_DIR}/fwmarks" ]]
+        then
+            echo "'${VPNSLICE_STATE_DIR}/fwmarks' (used as state file) exists, but is not a regular file" >&2
+            exit 1
+        fi
+
+        echo "Creating state file ('${VPNSLICE_STATE_DIR}/fwmarks')..."
+        install --mode=700 /dev/null "${VPNSLICE_STATE_DIR}/fwmarks"
+    fi
+
+    USER_UID="$(id --user "${USERNAME}")"
+    STATE_FILE="${VPNSLICE_STATE_DIR}/${NFTABLES_TABLE_PREFIX}-${USER_UID}-${USERNAME}-${USER_SLICE_NAME}"
+
+    if [[ ! -f "${STATE_FILE}" ]]
+    then
+        if [[ -e "${STATE_FILE}" ]]
+        then
+            echo "'${STATE_FILE}' (used as state file) exists, but is not a regular file" >&2
+            exit 1
+        fi
+
+        echo "Creating state file ('${STATE_FILE}')..."
+        install --mode=700 /dev/null "${STATE_FILE}"
+    fi
+
+    local -a existing_fwmarks
+
+    mapfile -t existing_fwmarks < "${VPNSLICE_STATE_DIR}/fwmarks"
+
+    local MARK_RANGE_END="$((MARK_RANGE_START + MARK_RANGE_COUNT - 1))"
+    local new_mark
+    new_mark="$(shuf --input-range="${MARK_RANGE_START}-${MARK_RANGE_END}" --head-count=1)"
+
+    if [[ "${#existing_fwmarks[@]}" -gt "$((MARK_RANGE_COUNT / 2))" ]]
+    then
+        echo "Insufficient free fwmark space" >&2
+        exit 1
+    fi
+
+    while [[ "${#existing_fwmarks[@]}" -gt "0" ]] && value_in_array "${new_mark}" -- "${existing_fwmarks[@]}"
+    do
+        new_mark="$(shuf --input-range="${MARK_RANGE_START}-${MARK_RANGE_END}" --head-count=1)"
+    done
+    
+    echo "${new_mark} will be used for this user/slice ('${USERNAME}'/'${USER_SLICE_NAME}') combination"
+    echo "${new_mark}" >> "${VPNSLICE_STATE_DIR}/fwmarks"
+
+    echo "Saving state to '${STATE_FILE}'..."
+    cat > "${STATE_FILE}" <<EOF
+FWMARK_NUMBER="${new_mark}"
+IPROUTE2_TABLE_NUMBER="${new_mark}"
+EOF
+    FWMARK_NUMBER="${new_mark}"
+    IPROUTE2_TABLE_NUMBER="${new_mark}"
+}
+
+set_iproute2_settings() {
+    echo "Setting up routes in table ${IPROUTE2_TABLE_NUMBER}..."
+    set -x
+    ip route add default dev "${VPN_TUN_NAME}" table "${IPROUTE2_TABLE_NUMBER}"
+    ip -6 route add default dev "${VPN_TUN_NAME}" table "${IPROUTE2_TABLE_NUMBER}"
+    set +x
+
+    echo "Setting up PBR to table ${IPROUTE2_TABLE_NUMBER}..."
+    set -x
+    ip rule add fwmark "${FWMARK_NUMBER}" lookup "${IPROUTE2_TABLE_NUMBER}"
+    ip -6 rule add fwmark "${FWMARK_NUMBER}" lookup "${IPROUTE2_TABLE_NUMBER}"
+    set +x
+}
+
+unset_iproute2_settings() {
+    echo "Removing PBR to table ${IPROUTE2_TABLE_NUMBER}..."
+    set -x
+    ip rule delete fwmark "${FWMARK_NUMBER}" lookup "${IPROUTE2_TABLE_NUMBER}"
+    ip -6 rule delete fwmark "${FWMARK_NUMBER}" lookup "${IPROUTE2_TABLE_NUMBER}"
+    set +x
+
+    echo "Removing routes in table ${IPROUTE2_TABLE_NUMBER}..."
+    set -x
+    ip route delete default dev "${VPN_TUN_NAME}" table "${IPROUTE2_TABLE_NUMBER}"
+    ip -6 route delete default dev "${VPN_TUN_NAME}" table "${IPROUTE2_TABLE_NUMBER}"
+    set +x
+}
+
+setup() {
+    echo "Setting up vpn netslice..."
+    if ! ip link show "${VPN_TUN_NAME}" >/dev/null 2>&1
+    then
+        echo "Device '${VPN_TUN_NAME}' is not up" >&2
+        echo "If device is set up using systemd unit, consider adding a drop-in to add it as a dependency" >&2
+        exit 1
+    fi
+
+    generate_settings
+
+    set_iproute2_settings
+    echo "Done!"
+}
+
+unsetup() {
+    echo "Removing settings for vpn netslice..."
+    load_settings
+    unset_iproute2_settings
+    remove_settings
+    echo "Done!"
+}
+
+main() {
+    if [[ "$(id --user)" != 0 ]]
+    then
+        echo "This script should be launched as root" >&2
+        exit 1
+    fi
+
+    if [[ "$#" -lt 1 ]]
+    then
+        echo "Please specify action ('--setup' or '--unsetup') and --config FILE" >&2
+        exit 1
+    fi
+
+    local action=""
+
+    while [[ "$#" -gt 0 ]]
+    do
+        case "$1" in
+            --setup)
+                action="setup"
+                shift 1
+                ;;
+            --unsetup)
+                action="unsetup"
+                CONFIG_FILE="${2}"
+                shift 1
+                ;;
+            --config)
+                CONFIG_FILE="${2}"
+                shift 2
+                ;;
+            *)
+                echo "Unknown argument: '${1}'" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    if [[ -z "${CONFIG_FILE}" ]]
+    then
+        echo "No config file specified" >&2
+        exit 1
+    fi
+
+    load_config
+
+    case "${action}" in 
+        setup)
+            setup "$@"
+            ;;
+        unsetup)
+            unsetup "$@"
+            ;;
+        *)
+            echo "Unknown action" >&2
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

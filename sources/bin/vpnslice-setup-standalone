@@ -1,0 +1,300 @@
+#!/usr/bin/env bash
+
+set -eu -o pipefail
+
+CONFIG_FILE=""
+
+load_config() {
+    if [[ -z "${CONFIG_FILE}" ]]
+    then
+        CONFIG_FILE="${XDG_CONFIG_HOME:-${HOME}/.config}/vpnslice.json"
+    fi
+
+    if ! [[ -f "${CONFIG_FILE}" ]]
+    then
+        echo "No config file '${CONFIG_FILE}'" >&2
+        exit 1
+    fi
+
+    tmp_config="$(mktemp --tmpdir "vpnslice.XXXXX")"
+
+    cp --update=all "${CONFIG_FILE}" "${tmp_config}"
+
+    VPN_UNIT_NAME="$(jq -rcM '.vpn_unit_name' "${tmp_config}")"
+
+    FWMARK_NUMBER="$(jq -rcM '.fwmark_number' "${tmp_config}")"
+    IPROUTE2_TABLE_NUMBER="$(jq -rcM '.iproute2_table_number' "${tmp_config}")"
+    NFTABLES_TABLE_NAME="$(jq -rcM '.nftables_table_name' "${tmp_config}")"
+    SYSTEMD_SLICE_NAME="$(jq -rcM '.systemd_slice_name' "${tmp_config}")"
+    VPN_TUN_NAME="$(jq -rcM '.vpn_tun_name' "${tmp_config}")"
+}
+
+check_dependencies() {
+    local -a DEPENDENCIES=()
+    local -a FAILED_DEPENDENCIES=()
+
+    if ! command -v "notify-send" >/dev/null 2>&1
+    then
+        echo "'notify-send' not installed, can't do GUI notifications :("
+        exit 1
+    fi
+
+    DEPENDENCIES=(
+        "sudo"
+        "ip"
+        "nft"
+        "systemctl"
+    )
+
+    for dependency in "${DEPENDENCIES[@]}"
+    do
+        if ! command -v "${dependency}" >/dev/null 2>&1
+        then
+            FAILED_DEPENDENCIES+=("${dependency}")
+        fi
+    done
+
+    if [[ "${#FAILED_DEPENDENCIES[@]}" -gt 0 ]]
+    then
+        notify-send --app-name="${MY_NAME}" "Following dependencies failed: ${FAILED_DEPENDENCIES[*]}"
+        exit 1
+    fi
+}
+
+test_sudo_access() {
+    echo "This action requires sudo/superuser privileges"
+    if [[ "$(sudo id -u)" != "0" ]]
+    then
+        echo "Failed to obtain sudo/superuser privileges" >&2
+        exit 1
+    fi
+}
+
+set_systemd_slice() {
+    echo "Setting up systemd user slice '${SYSTEMD_SLICE_NAME}.slice'"
+    set -x
+    systemctl --user start "${SYSTEMD_SLICE_NAME}.slice"
+    set +x
+}
+
+set_iproute2_settings() {
+    echo "Setting up routes in table ${IPROUTE2_TABLE_NUMBER}..."
+    set -x
+    sudo ip route add default dev "${VPN_TUN_NAME}" table "${IPROUTE2_TABLE_NUMBER}"
+    sudo ip -6 route add default dev "${VPN_TUN_NAME}" table "${IPROUTE2_TABLE_NUMBER}"
+    set +x
+
+    echo "Setting up PBR to table ${IPROUTE2_TABLE_NUMBER}..."
+    set -x
+    sudo ip rule add fwmark "${FWMARK_NUMBER}" lookup "${IPROUTE2_TABLE_NUMBER}"
+    sudo ip -6 rule add fwmark "${FWMARK_NUMBER}" lookup "${IPROUTE2_TABLE_NUMBER}"
+    set +x
+}
+
+set_global_nftables_rules() {
+    echo "Setting up nftables rules..."
+    print_global_nftables_rules \
+        | sudo nft -f-
+}
+
+set_flatpak_nftables_rules() {
+    if [[ "$#" -lt 1 ]]
+    then
+        echo "Error in 'set_flatpak_nftables_rules', expected 1 argument" >&2
+        exit 1
+    fi
+
+    local FLATPAK_SCOPE="${1}"
+
+    echo "Setting up nftables rules for '${FLATPAK_SCOPE}'..."
+    print_flatpak_nftables_rules "${FLATPAK_SCOPE}" \
+        | sudo nft -f-
+}
+
+unset_systemd_slice() {
+    echo "Removing systemd user slice '${SYSTEMD_SLICE_NAME}.slice'..."
+    local active_units
+    active_units="$(
+        systemctl --user status "${SYSTEMD_SLICE_NAME}" \
+            | grep -E -e "Act\\. Units" \
+            | cut --delimiter=":" --fields="2" \
+            | cut --delimiter=" " --fields="2"
+    )"
+
+    if [[ "${active_units}" == "0" ]]
+    then
+        set -x
+        systemctl --user stop "${SYSTEMD_SLICE_NAME}.slice"
+        set +x
+    else
+        echo "Skipped because there are active units"
+    fi
+}
+
+unset_iproute2_settings() {
+    echo "Removing PBR to table ${IPROUTE2_TABLE_NUMBER}..."
+    set -x
+    sudo ip rule delete fwmark "${FWMARK_NUMBER}" lookup "${IPROUTE2_TABLE_NUMBER}"
+    sudo ip -6 rule delete fwmark "${FWMARK_NUMBER}" lookup "${IPROUTE2_TABLE_NUMBER}"
+    set +x
+
+    echo "Removing routes in table ${IPROUTE2_TABLE_NUMBER}..."
+    set -x
+    sudo ip route delete default dev "${VPN_TUN_NAME}" table "${IPROUTE2_TABLE_NUMBER}"
+    sudo ip -6 route delete default dev "${VPN_TUN_NAME}" table "${IPROUTE2_TABLE_NUMBER}"
+    set +x
+}
+
+unset_global_nftables_rules() {
+    echo "Removing nftables rules..."
+    set -x
+    sudo nft delete table inet "${NFTABLES_TABLE_NAME}"
+    set +x
+}
+
+print_global_nftables_rules() {
+    cat << END_OF_RULES
+table inet ${NFTABLES_TABLE_NAME} {
+    chain output {
+        type route hook output priority mangle; policy accept;
+        socket cgroupv2 level 4 "/user.slice/user-${USER_UID}.slice/user@${USER_UID}.service/${SYSTEMD_SLICE_NAME}.slice" meta mark set ${FWMARK_NUMBER} counter
+    }
+}
+END_OF_RULES
+}
+
+print_flatpak_nftables_rules() {
+    if [[ "$#" -lt 1 ]]
+    then
+        echo "Error in 'print_flatpak_nftables_rules', expected 1 argument" >&2
+        exit 1
+    fi
+
+    local FLATPAK_SCOPE="${1}"
+
+    cat << END_OF_RULES
+table inet ${NFTABLES_TABLE_NAME} {
+    chain output {
+        type route hook output priority mangle; policy accept;
+        socket cgroupv2 level 5 "/user.slice/user-${USER_UID}.slice/user@${USER_UID}.service/app.slice/${FLATPAK_SCOPE}" meta mark set ${FWMARK_NUMBER} counter
+    }
+}
+END_OF_RULES
+}
+
+action_setup() {
+    echo "Setting up vpn netslice..."
+
+    if ! ip link show "${VPN_TUN_NAME}" >/dev/null 2>&1
+    then
+        if [[ -n "${VPN_UNIT_NAME}" ]]
+        then
+            sudo systemctl start "${VPN_UNIT_NAME}"
+            sleep 5
+            if ! ip link show "${VPN_TUN_NAME}" >/dev/null 2>&1
+            then
+                echo "Device '${VPN_TUN_NAME}' is not up" >&2
+                exit 1
+            fi
+        else
+            echo "Device '${VPN_TUN_NAME}' is not up" >&2
+            exit 1
+        fi
+    fi
+
+    set_systemd_slice
+    set_iproute2_settings
+    set_global_nftables_rules
+    echo "Done!"
+}
+
+action_unsetup() {
+    echo "Removing settings for vpn netslice..."
+    unset_global_nftables_rules
+    unset_iproute2_settings
+    echo "Done!"
+}
+
+action_flatpak() {
+    echo "Adding settings for flatpak..."
+
+    if ! systemctl --user status "${SYSTEMD_SLICE_NAME}.slice" >/dev/null 2>&1
+    then
+        echo "'${SYSTEMD_SLICE_NAME}.slice' does not exits, don't forget to setup first" >&2
+        exit 1
+    fi
+
+    local FLATPAK_SCOPE
+
+    FLATPAK_SCOPE="$(
+        systemctl --user status \
+            | grep -E -e "─app-flatpak" \
+            | grep -v "grep" \
+            | cut --delimiter="─" --fields=2 \
+            | fzf
+    )"
+    
+    set_flatpak_nftables_rules "${FLATPAK_SCOPE}"
+    echo "Done!"
+}
+
+main() {
+    USER_UID="$(id -u)"
+
+
+    if [[ "${USER_UID}" == 0 ]]
+    then
+        echo "Script should be launched as a regular user!" >&2
+        exit 1
+    fi
+
+    if [[ "$#" -lt 1 ]]
+    then
+        echo "Please specify action" >&2
+        exit 1
+    fi
+
+    local action="${1}"
+    shift
+
+    while [[ "$#" -gt 0 ]]
+    do
+        case "$1" in
+            --config)
+                CONFIG_FILE="${2}"
+                shift 2
+                ;;
+            -c)
+                CONFIG_FILE="${2}"
+                shift 2
+                ;;
+            *)
+                echo "Unrecognized option '${1}'" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    load_config
+
+    case "${action}" in 
+        setup)
+            test_sudo_access
+            action_setup "$@"
+            ;;
+        unsetup)
+            test_sudo_access
+            action_unsetup "$@"
+            ;;
+        flatpak)
+            test_sudo_access
+            action_flatpak "$@"
+            ;;
+        *)
+            echo "Unknown action" >&2
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
