@@ -216,10 +216,20 @@ unset_iproute2_settings() {
 }
 
 setup() {
+    local retry_count="5"
+    local retry_timeout="2"
+
     echo "Setting up vpn netslice..."
-    if ! ip link show "${VPN_TUN_NAME}" >/dev/null 2>&1
+    while [[ "${retry_count}" -gt "0" ]] && ! ip link show "${VPN_TUN_NAME}" >/dev/null 2>&1
+    do
+        retry_count="$((retry_count - 1))"
+        echo "Device '${VPN_TUN_NAME}' is not up, waiting..." >&2
+        sleep "${retry_timeout}"
+    done
+
+    if [[ "${retry_count}" -le "0" ]]
     then
-        echo "Device '${VPN_TUN_NAME}' is not up" >&2
+        echo "Device '${VPN_TUN_NAME}' is not up and timeout is expired" >&2
         echo "If device is set up using systemd unit, consider adding a drop-in to add it as a dependency" >&2
         exit 1
     fi
@@ -262,8 +272,7 @@ main() {
                 ;;
             --unsetup)
                 action="unsetup"
-                CONFIG_FILE="${2}"
-                shift 1
+                CONFIG_FILE="${2}" shift 1
                 ;;
             --config)
                 CONFIG_FILE="${2}"
