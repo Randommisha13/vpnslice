@@ -52,8 +52,10 @@ install:
 	install --mode=640 ./build/examples/* --target-directory=$(DESTDIR)$(VPNSLICE_CONFIG_DIR)
 
 build: sedscript binaries helpers systemd polkit examples
+	test "$(shell basename "$(shell pwd)")" == "build" # checking that PWD is 'build/'
 
 sedscript:
+	test "$(shell basename "$(shell pwd)")" == "build" # checking that PWD is 'build/'
 	echo 's|{{ prefix }}|$(prefix)|g' > sedscript.sed
 	echo 's|{{ exec_prefix }}|$(exec_prefix)|g' >> sedscript.sed
 	echo 's|{{ bindir }}|$(bindir)|g' >> sedscript.sed
