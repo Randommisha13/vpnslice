@@ -272,7 +272,7 @@ main() {
                 ;;
             --unsetup)
                 action="unsetup"
-                CONFIG_FILE="${2}" shift 1
+                shift 1
                 ;;
             --config)
                 CONFIG_FILE="${2}"
