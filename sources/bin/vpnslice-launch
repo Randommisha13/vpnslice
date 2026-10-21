@@ -25,6 +25,8 @@ load_config() {
 
     SYSTEMD_SLICE_NAME="$(jq -rcM '.systemd_slice_name' "${tmp_config}")"
 
+    # This options are not used in the script, they exist here to share the
+    # code with vpnslice-launch-standalone
     FWMARK_NUMBER="$(jq -rcM '.fwmark_number' "${tmp_config}")"
     IPROUTE2_TABLE_NUMBER="$(jq -rcM '.iproute2_table_number' "${tmp_config}")"
     NFTABLES_TABLE_NAME="$(jq -rcM '.nftables_table_name' "${tmp_config}")"
@@ -69,6 +71,18 @@ check_dependencies() {
 }
 
 get_running_flatpaks() {
+    # "systemctl --user status" output looks roughly like that:
+    # ---------------------------------------------------------------
+    # │ ├─app-flatpak-org.gimp.GIMP-2722626828.scope
+    # │ │ ├─3224201 bwrap --args 75 -- gimp-3.2
+    # │ ├─app-flatpak-org.gimp.GIMP-4022625839.scope
+    # │ │ ├─3224333 bwrap --args 71 -- prlimit
+    # │ ├─app-flatpak-org.gimp.GIMP-495999998.scope
+    # │ │ ├─3224281 bwrap --args 71 -- prlimit
+    # ---------------------------------------------------------------
+    # CLI may be unstable, it would probably be better to use some other
+    # method (with json output?)
+    # "grep -v -E '─[0-9]+ grep'" is needed to not list ourselve
     systemctl --user status \
         | grep -E -e "─app-flatpak" \
         | grep -v -E '─[0-9]+ grep' \
@@ -76,6 +90,10 @@ get_running_flatpaks() {
 }
 
 run_systemd() {
+    # This code is mostly borrowed from https://github.com/occasion-2/netslice
+    # Most of the ENV_ARGS is probably not needed because this implementation
+    # is based on user slices which hopefully already contain needed variables,
+    # but DEs/WMs without systemd integration are currently untested
     set +u
     ENV_ARGS=()
     [ -n "${DISPLAY}" ] && ENV_ARGS+=("--setenv=DISPLAY=${DISPLAY}")
@@ -120,6 +138,9 @@ run_desktop_noflatpak() {
 }
 
 run_desktop_flatpak() {
+    # Flatpak are communicating with systemd independently, which creates
+    # their a scope in app.slice. The only way found thus far is to add
+    # these scopes to nftables rules
     local -a flatpaks_before=()
     local -a flatpaks_after=()
     local -a flatpaks_diff=()
@@ -171,6 +192,8 @@ main() {
     if [[ "$#" -gt 0 ]]
     then
         case "${1}" in
+            # --config is somewhat deprecated and left for 'compatibility'
+            # with vpnslice-launch-standalone
             --config)
                 CONFIG_FILE="${2}"
                 shift 2
@@ -202,6 +225,8 @@ main() {
     USER_UID="$(id -u)"
     RUNTIME_DIR="${XDG_RUNTIME_DIR}"
 
+    # DESKTOP_ENTRY_ID is expected to be set with some launcher program,
+    # like fuzzel
     set +u
     if [[ -z "${DESKTOP_ENTRY_ID}" ]]
     then

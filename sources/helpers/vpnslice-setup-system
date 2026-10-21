@@ -164,6 +164,8 @@ generate_settings() {
     local new_mark
     new_mark="$(shuf --input-range="${MARK_RANGE_START}-${MARK_RANGE_END}" --head-count=1)"
 
+    # Script is expecting at least half of fwmarks to be free because the only
+    # generation strategy currently available is random
     if [[ "${#existing_fwmarks[@]}" -gt "$((MARK_RANGE_COUNT / 2))" ]]
     then
         echo "Insufficient free fwmark space" >&2

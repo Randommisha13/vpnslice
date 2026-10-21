@@ -1,0 +1,8 @@
+{
+    "fwmark_number": 1234,
+    "iproute2_table_number": 1234,
+    "nftables_table_name": "vpnslice-1000-johndoe-workvpn",
+    "systemd_slice_name": "workvpn",
+    "vpn_tun_name": "tun0",
+    "vpn_unit_name": "vpn@workvpn.service"
+}
