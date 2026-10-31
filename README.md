@@ -14,6 +14,85 @@ Core idea was taken from [occasion-2/netslice](https://github.com/occasion-2/net
 - `dex` for parsing and executing .desktop files
 - `pkexec` and `polkit` for privilege elevation
 
+## Usage
+
+vpnslice is launched using two systemd services --
+`vpnslice-system-setup@.service` and `vpnslice-user-setup@.service` (the reason
+for splitting the service is explained in the Architecture section).
+
+Both of these units are template units, `vpnslice-system-setup@.service`
+expects the name of the config file (without `.json` extension), and
+`vpnlice-user-setup@.service` expects the name of the slice that was previously
+prepared by system-setup.
+
+To activate slice `secrets` for user `johndoe` you will need to put
+configuration file, in configuration directory (`/etc/vpnslice/` or
+`/etc/local/vpnslice/` by default). You can use any name, except
+(`global.json`), in this example `1000-johndoe-secrets` will be used:
+
+Contents of `1000-johndoe-secrets.json`:
+```json
+{
+    "username": "johndoe",
+    "user_slice_name": "secrets",
+    "vpn_tun_name": "tun0"
+}
+
+```
+
+`username` and `user_slice_name` are mainly used for bookkeeping and isolation
+of diferent users' configuration, but should be set correctly because script
+launched by `vpnslice-user-setup@.service` checks that
+`vpnslice-system-setup@.service` was invoked with the same username and slice
+name.
+
+`vpn_tun_name` is the name of the interface which will be used as a default
+route for applications inside `secrets` slice.
+
+After writing the configuration file you need to
+
+1. Launch your VPN of choice (and ensure that interface name is correct)
+
+2. Start system setup:
+   `systemctl --system start vpnslice-system-setup@1000-johndoe-secrets.service`
+
+3. Finalize user setup:
+   `systemctl --user start vpnslice-user-setup@secrets.service`
+
+Step 3 will fail without step 2, and should automatically start the
+corresponding user slice.
+
+To launch a application inside vpnslice you can either use  
+`vpnslice-launch --slice secrets command ...`  
+or  
+`DESKTOP_ENTRY_ID=app.desktop vpnslice-launch --slice secrets`
+
+## Tips and tricks
+
+#### Using GUI to launch apps
+
+`miscellaneous` folder contains an example secrets-launch.desktop entry that
+uses fuzzel to choose which application to launch.
+
+You can copy it to `$XDG_DATA_HOME/applications`
+(`~/.local/share/applications`) and edit the slice name in the `Exec=` entry.
+
+#### Ordering TUN device startup
+
+If your TUN device is set up via systemd unit, you can add it as a dependency:
+
+Open systemd's edit dialog
+```
+systemctl edit vpnslice-system-setup@1000-johndoe-secrets.service
+```
+
+Insert the following into override file:
+
+```
+[Unit]
+Requires=myvpn-unit.service
+```
+
 ## Architecture
 
 ### Routing
@@ -23,10 +102,10 @@ fwmark as one of the actions:
 
 ```
 # nft list ruleset
-table inet vpnslice-1000-johndoe-workvpn {
+table inet vpnslice-1000-johndoe-secrets {
 	chain output {
 		type route hook output priority mangle; policy accept;
-		socket cgroupv2 level 4 "user.slice/user-1000.slice/user@1000.service/workvpn.slice" meta mark set 0x00001010
+		socket cgroupv2 level 4 "user.slice/user-1000.slice/user@1000.service/secrets.slice" meta mark set 0x00001010
 	}
 }
 ```
