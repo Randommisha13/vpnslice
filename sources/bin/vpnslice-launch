@@ -236,7 +236,7 @@ main() {
     fi
     set -u
 
-    if ! systemctl --user status "${SYSTEMD_SLICE_NAME}.slice"
+    if ! systemctl --user status "${SYSTEMD_SLICE_NAME}.slice" >/dev/null 2>&1
     then
         notify-send --app-name="${MY_NAME}" "'${SYSTEMD_SLICE_NAME}.slice' is not running"
         exit 1
@@ -244,27 +244,47 @@ main() {
 
     USER_APPLICATIONS_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/applications"
 
-    DESKTOP_ENTRY_LOCATION="$(locate "/${DESKTOP_ENTRY_ID}" | head -1)" \
-    || DESKTOP_ENTRY_LOCATION="$(find "${USER_APPLICATIONS_DIR}" -name "${DESKTOP_ENTRY_ID}")"
+    local -a DESKTOP_ENTRY_CANDIDATES
+    mapfile -t DESKTOP_ENTRY_CANDIDATES < <(locate "/${DESKTOP_ENTRY_ID}" | head -1)
 
-    if [[ -z "${DESKTOP_ENTRY_LOCATION}" ]]
+    if [[ "${#DESKTOP_ENTRY_CANDIDATES[@]}" == 0 ]]
+    then
+        mapfile -t DESKTOP_ENTRY_CANDIDATES < <(find "${USER_APPLICATIONS_DIR}" -name "${DESKTOP_ENTRY_ID}")
+    fi
+
+    if [[ "${#DESKTOP_ENTRY_CANDIDATES[@]}" == 0 ]]
     then
         notify-send --app-name="${MY_NAME}" "Can't find '${DESKTOP_ENTRY_ID}'"
         exit 1
     fi
     
-    case "${DESKTOP_ENTRY_LOCATION}" in
-        "/usr/share/applications/"*)
-            ;;
-        "/var/lib/flatpak/"*)
-            ;;
-        "${HOME}/.local/share/applications/"*)
-            ;;
-        *)
-            notify-send --app-name="${MY_NAME}" "Unknown folder $(dirname "${DESKTOP_ENTRY_LOCATION}") for '${DESKTOP_ENTRY_ID}'"
-            exit 1
-            ;;
-    esac
+    local LOCATION_FOUND=0
+    for CANDIDATE in "${DESKTOP_ENTRY_CANDIDATES[@]}"
+    do
+        case "${CANDIDATE}" in
+            "/usr/share/applications/"*)
+                DESKTOP_ENTRY_LOCATION="${CANDIDATE}"
+                LOCATION_FOUND=1
+                break
+                ;;
+            "/var/lib/flatpak/"*)
+                DESKTOP_ENTRY_LOCATION="${CANDIDATE}"
+                LOCATION_FOUND=1
+                break
+                ;;
+            "${HOME}/.local/share/applications/"*)
+                DESKTOP_ENTRY_LOCATION="${CANDIDATE}"
+                LOCATION_FOUND=1
+                break
+                ;;
+        esac
+    done
+
+    if [[ "${LOCATION_FOUND}" == 0 ]]
+    then
+        notify-send --app-name="${MY_NAME}" "Unknown folder(s) $(dirname "${DESKTOP_ENTRY_CANDIDATES[0]}") for '${DESKTOP_ENTRY_ID}'"
+        exit 1
+    fi
 
     DESKTOP_ENTRY_EXECUTABLE="$(
         dex -d "${DESKTOP_ENTRY_LOCATION}" \
