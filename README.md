@@ -95,7 +95,7 @@ Requires=myvpn-unit.service
 
 ## Architecture
 
-### Routing
+### How vpnslice does routing
 
 `nftables` support matching packets by cgroup they belong to, and setting
 fwmark as one of the actions:
@@ -128,7 +128,7 @@ Said table can contain a route that forwards all traffic through TUN interface:
 default dev tun0 scope link
 ```
 
-### Setup
+### How vpnslice is set up
 
 `vpnslice-system-setup` creates necessary infrastructure -- it adds routing
 rule and table with default route through TUN, but because vpnslice uses user
@@ -149,7 +149,7 @@ be launched through `sudo` or `pkexec` (systemd units use the former); build
 process also creates `pkexec`/polkit rules file that allow any member of group
 '`wheel`' to launch them without a password.
 
-### Launching apps
+### How vpnslices launches apps
 
 `vpnslice-launch` works in three modes, all three require either `--slice
 SLICE_NAME` or `--config CONFIG_FILE` as arguments before any others:
