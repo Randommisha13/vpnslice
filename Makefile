@@ -4,7 +4,7 @@ exec_prefix ?= $(prefix)
 
 bindir ?= $(exec_prefix)/bin
 libdir ?= $(exec_prefix)/lib
-libexecdir ?= $(exec_prefix)/libexec
+libexecdir ?= $(libdir)
 
 datarootdir ?= $(prefix)/share
 datadir ?= $(datarootdir)
