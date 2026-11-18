@@ -61,8 +61,10 @@ main() {
     fi
 
     source "${VPNSLICE_STATE_DIR}/${NFTABLES_TABLE_NAME}"
-    
+
+    echo "All good, setting nftables rules..."
     set_global_nftables_rules "$@"
+    echo "Done"
 }
 
 main "$@"
