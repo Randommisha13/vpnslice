@@ -1,5 +1,5 @@
 pkgname="vpnslice"
-pkgver=1.1
+pkgver=1.2
 pkgrel=1
 pkgdesc="Bash scripts and other files to set up per-app split routing"
 arch=("any")
