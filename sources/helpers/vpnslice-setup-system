@@ -217,6 +217,17 @@ unset_iproute2_settings() {
     set +x
 }
 
+unset_nftables_settings() {
+    USER_UID="$(id --user "${USERNAME}")"
+    NFTABLES_TABLE_NAME="${NFTABLES_TABLE_PREFIX}-${USER_UID}-${USERNAME}-${USER_SLICE_NAME}"
+
+    if nft list table inet "${NFTABLES_TABLE_NAME}" >/dev/null 2>&1
+    then
+        echo "Removing nftables table${IPROUTE2_TABLE_NUMBER}..."
+        nft delete table inet "${NFTABLES_TABLE_NAME}"
+    fi
+}
+
 setup() {
     local retry_count="5"
     local retry_timeout="2"
@@ -246,6 +257,7 @@ unsetup() {
     echo "Removing settings for vpn netslice..."
     load_settings
     unset_iproute2_settings
+    unset_nftables_settings
     remove_settings
     echo "Done!"
 }
